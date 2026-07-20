@@ -82,10 +82,16 @@ def check_watch(watch, state, api_key):
     """Check a single watch. Callers wrap this in try/except so one failing
     fetch cannot abort the run for the others."""
     wid = watch["id"]
+    from_code = watch["from"].upper()
+    to_code = watch["to"].upper()
     entry = state.setdefault(wid, {})
+    if entry.get("paused"):
+        print("skipping %s (paused)" % wid)
+        return
     if entry.get("alerted"):
-        return  # already fired; stays silent until an explicit reset
-    rate = fetch_rate(watch["from"], watch["to"], api_key)
+        print("skipping %s (already alerted)" % wid)
+        return
+    rate = fetch_rate(from_code, to_code, api_key)
     which = crossed_bound(rate, watch)
     if which is None:
         return
@@ -95,7 +101,7 @@ def check_watch(watch, state, api_key):
     save_state(state)
     # Stub for this step; Step 4 replaces it with the real readable email.
     print("ALERT %s: 1 %s = %s %s (%s bound crossed)" % (
-        wid, watch["from"], rate, watch["to"], which))
+        wid, from_code, rate, to_code, which))
 
 
 def require_env(names):
