@@ -28,6 +28,17 @@ STATE_PATH = "state.json"
 # is therefore secret-bearing and is NEVER printed (see _scrub in main()).
 CURRENCYAPI_BASE = "https://currencyapi.net/api/v2/rates"
 
+HISTORY_CAP = 90
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def utc_timestamp():
+    """Current time as an ISO-8601 UTC string with a trailing 'Z', e.g.
+    "2026-07-20T06:00:12Z" — the exact format history entries use, so the
+    alert email's timestamp and the history it summarizes never drift into
+    two different UTC string styles."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def load_json(path, default):
     """Read a JSON file, or return `default` if it does not exist yet. State
@@ -90,7 +101,26 @@ def format_rate(rate):
     return "{:.6g}".format(rate)
 
 
-def send_alert_email(wid, from_code, to_code, rate, which, bound_value):
+def sparkline(history):
+    """Min-max normalize history rates onto SPARK_CHARS; an all-equal
+    history renders the middle char for every point. `history` is a list
+    of [timestamp, rate] pairs; pure function, stdlib only."""
+    rates = [r for _, r in history]
+    if not rates:
+        return ""
+    lo, hi = min(rates), max(rates)
+    if lo == hi:
+        bar = SPARK_CHARS[len(SPARK_CHARS) // 2] * len(rates)
+    else:
+        span = hi - lo
+        bar = "".join(
+            SPARK_CHARS[min(int((r - lo) / span * len(SPARK_CHARS)), len(SPARK_CHARS) - 1)]
+            for r in rates
+        )
+    return "%s (last %d checks)" % (bar, len(rates))
+
+
+def send_alert_email(wid, from_code, to_code, rate, which, bound_value, history):
     """Send the alert as a plain-text email. Raises smtplib.SMTPException
     on failure; callers already wrap check_watch in try/except, so a send
     failure is logged (scrubbed) and skipped like any other watch error —
@@ -100,13 +130,14 @@ def send_alert_email(wid, from_code, to_code, rate, which, bound_value):
     mail_to = os.environ["MAIL_TO"]
 
     subject = "Rate alert: 1 %s = %s %s" % (from_code, format_rate(rate), to_code)
-    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     body = (
         "Watch: %s\n"
         "1 %s = %s %s\n"
         "%s bound crossed (%s)\n"
         "Checked: %s\n"
-    ) % (wid, from_code, format_rate(rate), to_code, which, bound_value, checked_at)
+        "%s\n"
+    ) % (wid, from_code, format_rate(rate), to_code, which, bound_value,
+         utc_timestamp(), sparkline(history))
 
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
@@ -133,6 +164,12 @@ def check_watch(watch, state, api_key):
         print("skipping %s (already alerted)" % wid)
         return
     rate = fetch_rate(from_code, to_code, api_key)
+    # Recorded for every successful check, alert or not — the sparkline
+    # needs a real trend line for watches that never cross a bound.
+    history = entry.setdefault("history", [])
+    history.append([utc_timestamp(), rate])
+    del history[:-HISTORY_CAP]
+
     which = crossed_bound(rate, watch)
     if which is None:
         return
@@ -140,7 +177,7 @@ def check_watch(watch, state, api_key):
     # the flag is already saved and the alert will not repeat next run.
     entry["alerted"] = True
     save_state(state)
-    send_alert_email(wid, from_code, to_code, rate, which, watch.get(which))
+    send_alert_email(wid, from_code, to_code, rate, which, watch.get(which), history)
 
 
 def require_env(names):
