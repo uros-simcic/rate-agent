@@ -98,7 +98,18 @@ def check_watch(watch, state, api_key):
         wid, watch["from"], rate, watch["to"], which))
 
 
+def require_env(names):
+    """Exit with one clear message naming every missing var, instead of
+    letting a lazy os.environ[...] raise a bare KeyError deep in whichever
+    code path happens to touch it first. Called once at startup so a
+    misconfigured run fails immediately, not partway through."""
+    missing = [n for n in names if not os.environ.get(n)]
+    if missing:
+        sys.exit("missing required environment variable(s): %s" % ", ".join(missing))
+
+
 def main():
+    require_env(["CURRENCYAPI_KEY"])
     api_key = os.environ["CURRENCYAPI_KEY"]
 
     def scrub(text):
