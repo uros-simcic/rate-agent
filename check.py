@@ -12,10 +12,13 @@ lives in agent.py and never runs a check or sends an alert.
 
 import json
 import os
+import smtplib
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from email.mime.text import MIMEText
 
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
@@ -78,6 +81,44 @@ def crossed_bound(rate, watch):
     return None
 
 
+def format_rate(rate):
+    """Comma-grouped, readable rate: "96,000" for large/whole values,
+    "0.245" for small ones — never Python's raw float repr."""
+    if abs(rate) >= 1:
+        text = "{:,.2f}".format(rate)
+        return text[:-3] if text.endswith(".00") else text
+    return "{:.6g}".format(rate)
+
+
+def send_alert_email(wid, from_code, to_code, rate, which, bound_value):
+    """Send the alert as a plain-text email. Raises smtplib.SMTPException
+    on failure; callers already wrap check_watch in try/except, so a send
+    failure is logged (scrubbed) and skipped like any other watch error —
+    state.alerted was already saved beforehand, so it will not repeat."""
+    mail_user = os.environ["MAIL_USERNAME"]
+    mail_pass = os.environ["MAIL_APP_PASSWORD"]
+    mail_to = os.environ["MAIL_TO"]
+
+    subject = "Rate alert: 1 %s = %s %s" % (from_code, format_rate(rate), to_code)
+    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    body = (
+        "Watch: %s\n"
+        "1 %s = %s %s\n"
+        "%s bound crossed (%s)\n"
+        "Checked: %s\n"
+    ) % (wid, from_code, format_rate(rate), to_code, which, bound_value, checked_at)
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = mail_user
+    msg["To"] = mail_to
+
+    recipients = [addr.strip() for addr in mail_to.split(",") if addr.strip()]
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(mail_user, mail_pass)
+        server.sendmail(mail_user, recipients, msg.as_string())
+
+
 def check_watch(watch, state, api_key):
     """Check a single watch. Callers wrap this in try/except so one failing
     fetch cannot abort the run for the others."""
@@ -99,9 +140,7 @@ def check_watch(watch, state, api_key):
     # the flag is already saved and the alert will not repeat next run.
     entry["alerted"] = True
     save_state(state)
-    # Stub for this step; Step 4 replaces it with the real readable email.
-    print("ALERT %s: 1 %s = %s %s (%s bound crossed)" % (
-        wid, from_code, rate, to_code, which))
+    send_alert_email(wid, from_code, to_code, rate, which, watch.get(which))
 
 
 def require_env(names):
@@ -115,15 +154,20 @@ def require_env(names):
 
 
 def main():
-    require_env(["CURRENCYAPI_KEY"])
+    require_env(["CURRENCYAPI_KEY", "MAIL_USERNAME", "MAIL_APP_PASSWORD", "MAIL_TO"])
     api_key = os.environ["CURRENCYAPI_KEY"]
+    mail_pass = os.environ["MAIL_APP_PASSWORD"]
 
     def scrub(text):
-        """Redact the API key from any string before it is printed. Nothing
-        today puts the key into error text (it lives only in the request
-        URL, which is never logged), but this defends the invariant rather
-        than trusting it silently."""
-        return text.replace(api_key, "<CURRENCYAPI_KEY>") if api_key else text
+        """Redact secrets from any string before it is printed. The API key
+        lives only in the request URL and the mail password only in the
+        SMTP login call — neither should reach an exception message today,
+        but this defends the invariant rather than trusting it silently."""
+        if api_key:
+            text = text.replace(api_key, "<CURRENCYAPI_KEY>")
+        if mail_pass:
+            text = text.replace(mail_pass, "<MAIL_APP_PASSWORD>")
+        return text
 
     config = load_json(CONFIG_PATH, None)
     state = load_json(STATE_PATH, {})
