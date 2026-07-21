@@ -58,13 +58,19 @@ def load_json(path, default):
         return default
 
 
+def save_json(path, data):
+    """Generic JSON writer -- shared by save_state() and the command
+    channels, which also need to persist config.json after apply_changes()."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+
+
 def save_state(state):
     """Persist state to disk. Called immediately after a watch is marked
     alerted so that a crash later in the run cannot lose that flag and
     re-send the same alert on the next run — the duplicate-alert bug this
     write-ordering exists to prevent."""
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, sort_keys=True)
+    save_json(STATE_PATH, state)
 
 
 def fetch_all_rates(api_key):

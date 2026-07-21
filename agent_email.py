@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
 """Email command channel: polls the agent's mailbox for candidate command
-messages and gates them by sender, subject keyword, and DKIM. This step
-only fetches and gates -- print-only, no \\Seen, no pipeline wiring (that
-lands in the next step once gating itself is verified against a real
-inbox).
+messages, gates them by sender, subject keyword, and DKIM, then runs
+accepted candidates through agent.py's parse -> validate -> apply ->
+reply pipeline.
 
-Command text is untrusted input (see agent.py's parse_command) -- these
+Command text is untrusted input (see agent.py's parse_command) -- the
 three gates decide whether a message is even a CANDIDATE for that
 pipeline. They do not themselves authorize any config/state change; only
-validate_command()'s allowlist/bounds checks decide that.
+validate_command()'s allowlist/bounds checks decide that. Every message
+is marked \\Seen after processing, win or lose, so it is never
+reprocessed on the next poll.
 """
 
 import email
 import imaplib
 import os
+import re
+
+import agent
+import check
+import mailer
+
+REPLY_SUBJECT_PREFIX = "Agent: "
 
 
 def passes_gates(msg, command_sender, command_keyword):
@@ -62,13 +70,36 @@ def fetch_candidates(imap):
     return candidates
 
 
+def build_reply_subject(reply_text, command_keyword):
+    """"Agent: " + a short summary, with the command keyword stripped out
+    if it ever appeared. Replies go to MAIL_TO, never the polled inbox, so
+    this can't actually create a poll loop -- the strip is defense in
+    depth per §7, not the only thing preventing one."""
+    first_line = reply_text.splitlines()[0] if reply_text else "command result"
+    subject = REPLY_SUBJECT_PREFIX + first_line
+    if command_keyword:
+        subject = re.sub(re.escape(command_keyword), "[keyword]", subject, flags=re.IGNORECASE)
+    return subject
+
+
 def main():
-    for name in ("MAIL_USERNAME", "MAIL_APP_PASSWORD", "COMMAND_SENDER", "COMMAND_KEYWORD"):
+    for name in ("MAIL_USERNAME", "MAIL_APP_PASSWORD", "MAIL_TO",
+                 "COMMAND_SENDER", "COMMAND_KEYWORD", "GEMINI_API_KEY"):
         if not os.environ.get(name):
             raise SystemExit("missing required environment variable: %s" % name)
 
     command_sender = os.environ["COMMAND_SENDER"]
     command_keyword = os.environ["COMMAND_KEYWORD"]
+    gemini_api_key = os.environ["GEMINI_API_KEY"]
+    dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true")
+
+    def scrub(text):
+        return text.replace(gemini_api_key, "<GEMINI_API_KEY>") if gemini_api_key else text
+
+    config = check.load_json(check.CONFIG_PATH, None)
+    state = check.load_json(check.STATE_PATH, {})
+    allowlist = agent.load_allowlist()
+    model = config.get("gemini_model", "gemini-3.5-flash")
 
     imap = imaplib.IMAP4_SSL("imap.gmail.com")
     imap.login(os.environ["MAIL_USERNAME"], os.environ["MAIL_APP_PASSWORD"])
@@ -78,13 +109,44 @@ def main():
         print("found %d unseen candidate(s)" % len(candidates))
         for msg_id, msg in candidates:
             passed, gates = passes_gates(msg, command_sender, command_keyword)
-            # Logging rule (§7.6): message-id and gate results only --
-            # never the header values themselves, never the body.
+            # Logging rule (§7.6): message-id and gate results/validated
+            # action only -- never header values, never the body.
             print("candidate %s: from=%s subject=%s dkim=%s -> %s" % (
                 msg_id.decode(), gates["from"], gates["subject"], gates["dkim"],
-                "would accept" if passed else "would reject"))
+                "accepted" if passed else "rejected"))
+
+            if passed:
+                text = extract_body(msg)
+                try:
+                    verdict, changes, reply_text = agent.handle_command(
+                        text, config, state, allowlist, model, gemini_api_key)
+                except Exception as err:
+                    verdict, changes = "unknown", None
+                    reply_text = "Couldn't process that command."
+                    print("ERROR handling %s: %s" % (msg_id.decode(), scrub(str(err))))
+                print("candidate %s: validated action=%s" % (msg_id.decode(), verdict))
+
+                if dry_run:
+                    print("DRY RUN: would apply %r and reply %r" % (changes, reply_text))
+                else:
+                    agent.apply_changes(changes, config, state)
+                    subject = build_reply_subject(reply_text, command_keyword)
+                    try:
+                        mailer.send_email(subject, reply_text)
+                    except Exception as err:
+                        print("ERROR replying to %s: %s" % (msg_id.decode(), scrub(str(err))))
+
+            # Marked \Seen whether or not it parsed -- processed once,
+            # never reprocessed. Dry runs skip this too: nothing should
+            # be consumed by a preview.
+            if not dry_run:
+                imap.store(msg_id, "+FLAGS", "\\Seen")
     finally:
         imap.logout()
+
+    if not dry_run:
+        check.save_json(check.CONFIG_PATH, config)
+        check.save_json(check.STATE_PATH, state)
 
 
 if __name__ == "__main__":
