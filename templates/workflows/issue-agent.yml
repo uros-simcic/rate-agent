@@ -1,0 +1,76 @@
+# Instance workflow: copy this file into your private instance repo at
+# .github/workflows/issue-agent.yml. Runs a command from an issue opened
+# on THIS (private) repo -- issues here are only visible to the owner,
+# so opening one is itself the access control for the command channel.
+name: issue-agent
+
+on:
+  issues:
+    types: [opened]
+
+# issues: write to comment and close; contents: write for the
+# state-commit step below.
+permissions:
+  issues: write
+  contents: write
+
+# Shared across check/mail-agent/issue-agent: an issue command must not
+# race a scheduled check's state commit, so all three queue on one group
+# rather than cancelling each other.
+concurrency:
+  group: rate-agent
+  cancel-in-progress: false
+
+jobs:
+  issue-agent:
+    # Belt-and-suspenders: this is a private repo, so only the owner can
+    # open an issue on it at all -- this guard still checks explicitly,
+    # since anyone the repo is later shared with would otherwise also be
+    # able to trigger commands.
+    if: github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Your instance: config.json + state.json + currencies.json
+      - uses: actions/checkout@v4
+      # The engine: code only. Tracking master means instances always run
+      # the latest engine; point `repository:` (and optionally `ref:`) at
+      # your own copy if you'd rather pin.
+      - uses: actions/checkout@v4
+        with:
+          repository: uros-simcic/rate-agent
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run issue agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python engine/agent_issue.py
+      # Runs regardless of the step above's outcome. Either file may not
+      # exist yet on a brand-new instance -- guarded so "nothing to add"
+      # isn't a git error (same fix as check.yml's state.json guard).
+      - name: Commit state changes
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f config.json ]; then
+            git add config.json
+          fi
+          if [ -f state.json ]; then
+            git add state.json
+          fi
+          if git diff --staged --quiet; then
+            echo "no state changes to commit"
+          else
+            git commit -m "chore(state): $(date -u +%Y-%m-%d) [skip ci]"
+            for attempt in 1 2 3; do
+              if git push; then
+                break
+              fi
+              echo "push failed (attempt $attempt), rebasing and retrying"
+              git pull --rebase
+            done
+          fi
