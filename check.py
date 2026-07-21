@@ -23,9 +23,14 @@ from email.mime.text import MIMEText
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
 
-# One call per watch per run. The key travels in the query string because
-# that is the only auth mechanism currencyapi.net documents; the request URL
-# is therefore secret-bearing and is NEVER printed (see _scrub in main()).
+# One call per RUN (not per watch): the free plan has a fixed base
+# currency and rejects any base= param with a 403 ("Your subscription
+# plan does not allow you to select a base currency") -- confirmed live
+# against this project's own key. Every rate below is computed as a cross
+# rate through that fixed base instead. The key travels in the query
+# string because that is the only auth mechanism currencyapi.net
+# documents; the request URL is therefore secret-bearing and is NEVER
+# printed (see _scrub in main()).
 CURRENCYAPI_BASE = "https://currencyapi.net/api/v2/rates"
 
 HISTORY_CAP = 90
@@ -62,34 +67,39 @@ def save_state(state):
         json.dump(state, f, indent=2, sort_keys=True)
 
 
-def fetch_rate(from_code, to_code, api_key):
-    """Return the current rate (float) of 1 `from` in `to` from
-    currencyapi.net. from/to come from validated config, never from model
-    output; they are URL-quoted defensively all the same."""
-    url = "%s?key=%s&base=%s&output=JSON" % (
-        CURRENCYAPI_BASE,
-        urllib.parse.quote(api_key),
-        urllib.parse.quote(from_code),
-    )
+def fetch_all_rates(api_key):
+    """Fetch every currencyapi.net rate against its (free-plan-fixed) base
+    currency in one call. Raises ValueError with the response body on an
+    HTTP error -- a bare "HTTP Error 403: Forbidden" gave no clue why the
+    free plan rejected a base= param until the body was captured; mirrors
+    gemini_client.py's HTTPError handling."""
+    url = "%s?key=%s&output=JSON" % (CURRENCYAPI_BASE, urllib.parse.quote(api_key))
     req = urllib.request.Request(url, headers={"User-Agent": "rate-agent/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.load(resp)
     except urllib.error.HTTPError as err:
-        # Bare "HTTP Error 403: Forbidden" gives no clue why; the response
-        # body usually names the reason (bad key, wrong plan, IP block).
-        # Mirrors gemini_client.py's HTTPError handling.
         detail = ""
         try:
             detail = err.read(300).decode("utf-8", "replace")
         except OSError:
             pass
-        raise ValueError("HTTP %d fetching %s->%s: %s"
-                          % (err.code, from_code, to_code, detail)) from err
+        raise ValueError("HTTP %d fetching rates: %s" % (err.code, detail)) from err
     rates = data.get("rates")
-    if not isinstance(rates, dict) or to_code not in rates:
-        raise ValueError("no rate for %s->%s in API response" % (from_code, to_code))
-    return float(rates[to_code])
+    if not isinstance(rates, dict):
+        raise ValueError("no rates in API response")
+    return rates
+
+
+def cross_rate(rates, from_code, to_code):
+    """1 `from` in `to`, computed through the fixed base both are quoted
+    against: rates[X] is how many X per 1 base unit, so 1 from = 1/rates[from]
+    base units = rates[to]/rates[from] `to` units. Same "AED to EUR" search-box
+    direction as everywhere else -- no inversion."""
+    if from_code not in rates or to_code not in rates:
+        missing = [c for c in (from_code, to_code) if c not in rates]
+        raise ValueError("no rate for %s in API response" % ", ".join(missing))
+    return float(rates[to_code]) / float(rates[from_code])
 
 
 def crossed_bound(rate, watch):
@@ -163,9 +173,10 @@ def send_alert_email(wid, from_code, to_code, rate, which, bound_value, history)
         server.sendmail(mail_user, recipients, msg.as_string())
 
 
-def check_watch(watch, state, api_key, dry_run=False):
-    """Check a single watch. Callers wrap this in try/except so one failing
-    fetch cannot abort the run for the others. In dry_run, every write to
+def check_watch(watch, state, rates, dry_run=False):
+    """Check a single watch against one run's already-fetched rates dict.
+    Callers wrap this in try/except so one watch with a missing currency
+    code cannot abort the run for the others. In dry_run, every write to
     state.json is skipped and the alert becomes a print preview, so a
     dispatched dry run can never mark a watch alerted or send mail."""
     wid = watch["id"]
@@ -178,7 +189,7 @@ def check_watch(watch, state, api_key, dry_run=False):
     if entry.get("alerted"):
         print("skipping %s (already alerted)" % wid)
         return
-    rate = fetch_rate(from_code, to_code, api_key)
+    rate = cross_rate(rates, from_code, to_code)
     # Recorded for every successful check, alert or not — the sparkline
     # needs a real trend line for watches that never cross a bound. Kept
     # in-memory even in dry_run (harmless — never written to disk), so the
@@ -234,9 +245,18 @@ def main():
 
     config = load_json(CONFIG_PATH, None)
     state = load_json(STATE_PATH, {})
+    try:
+        rates = fetch_all_rates(api_key)
+    except Exception as err:
+        # No rates means nothing in this run can be checked; log (scrubbed)
+        # and exit cleanly rather than crash -- an API outage is transient
+        # and the next scheduled run will simply try again.
+        print("ERROR fetching rates: %s" % scrub(str(err)), file=sys.stderr)
+        return
+
     for watch in config.get("watches", []):
         try:
-            check_watch(watch, state, api_key, dry_run)
+            check_watch(watch, state, rates, dry_run)
         except Exception as err:
             # One watch's failure is logged (key-scrubbed) and skipped; the
             # remaining watches still run.
