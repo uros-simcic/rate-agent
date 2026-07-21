@@ -12,13 +12,13 @@ lives in agent.py and never runs a check or sends an alert.
 
 import json
 import os
-import smtplib
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
+
+import mailer
 
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
@@ -144,14 +144,10 @@ def sparkline(history):
 
 
 def send_alert_email(wid, from_code, to_code, rate, which, bound_value, history):
-    """Send the alert as a plain-text email. Raises smtplib.SMTPException
-    on failure; callers already wrap check_watch in try/except, so a send
-    failure is logged (scrubbed) and skipped like any other watch error —
+    """Build and send the alert. Raises smtplib.SMTPException on failure;
+    callers already wrap check_watch in try/except, so a send failure is
+    logged (scrubbed) and skipped like any other watch error --
     state.alerted was already saved beforehand, so it will not repeat."""
-    mail_user = os.environ["MAIL_USERNAME"]
-    mail_pass = os.environ["MAIL_APP_PASSWORD"]
-    mail_to = os.environ["MAIL_TO"]
-
     subject = "Rate alert: 1 %s = %s %s" % (from_code, format_rate(rate), to_code)
     body = (
         "Watch: %s\n"
@@ -161,16 +157,7 @@ def send_alert_email(wid, from_code, to_code, rate, which, bound_value, history)
         "%s\n"
     ) % (wid, from_code, format_rate(rate), to_code, which, bound_value,
          utc_timestamp(), sparkline(history))
-
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = mail_user
-    msg["To"] = mail_to
-
-    recipients = [addr.strip() for addr in mail_to.split(",") if addr.strip()]
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(mail_user, mail_pass)
-        server.sendmail(mail_user, recipients, msg.as_string())
+    mailer.send_email(subject, body)
 
 
 def check_watch(watch, state, rates, dry_run=False):
