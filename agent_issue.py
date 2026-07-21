@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """Issue command channel: reads the workflow's issue-opened event payload,
-extracts the command text, and runs it through agent.py's parse ->
-validate pipeline. This step only reads and validates -- no comment, no
-close, no apply (that lands in the next step once parsing/validation
-itself is verified). Issue text is untrusted input like email body text
-(see agent.py's parse_command); the owner-only trigger guard lives in
-the workflow (§8), not here.
+runs the command through agent.py's parse -> validate -> apply pipeline,
+then posts the result as a comment and closes the issue. Issue text is
+untrusted input like email body text (see agent.py's parse_command); the
+owner-only trigger guard lives in the workflow (§8), not here.
+
+Comment/close API URLs are built ONLY from the event payload's own repo
+fields (full_name) and issue number -- never from anything the model
+returned -- the same "code constructs every URL" discipline as check.py's
+request URLs.
 """
 
 import json
 import os
+import urllib.error
+import urllib.request
 
 import agent
 import check
 
 MAX_CHARS = 2000
+GITHUB_API_BASE = "https://api.github.com"
 
 
 def load_event():
@@ -30,12 +36,54 @@ def extract_command_text(event, max_chars=MAX_CHARS):
     return text[:max_chars]
 
 
+def _github_request(url, github_token, method, payload):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer %s" % github_token,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "rate-agent/1.0",
+        },
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as err:
+        detail = ""
+        try:
+            detail = err.read(300).decode("utf-8", "replace")
+        except OSError:
+            pass
+        raise RuntimeError("HTTP %d for %s %s: %s" % (err.code, method, url, detail)) from err
+
+
+def post_comment(repo_full_name, issue_number, body, github_token):
+    url = "%s/repos/%s/issues/%s/comments" % (GITHUB_API_BASE, repo_full_name, issue_number)
+    return _github_request(url, github_token, "POST", {"body": body})
+
+
+def close_issue(repo_full_name, issue_number, github_token):
+    url = "%s/repos/%s/issues/%s" % (GITHUB_API_BASE, repo_full_name, issue_number)
+    return _github_request(url, github_token, "PATCH", {"state": "closed"})
+
+
 def main():
-    if not os.environ.get("GEMINI_API_KEY"):
-        raise SystemExit("missing required environment variable: GEMINI_API_KEY")
+    for name in ("GEMINI_API_KEY", "GITHUB_TOKEN"):
+        if not os.environ.get(name):
+            raise SystemExit("missing required environment variable: %s" % name)
+    github_token = os.environ["GITHUB_TOKEN"]
+    dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true")
+
+    def scrub(text):
+        return text.replace(github_token, "<GITHUB_TOKEN>") if github_token else text
 
     event = load_event()
     text = extract_command_text(event)
+    repo_full_name = event["repository"]["full_name"]
+    issue_number = event["issue"]["number"]
 
     config = check.load_json(check.CONFIG_PATH, None)
     state = check.load_json(check.STATE_PATH, {})
@@ -44,11 +92,22 @@ def main():
 
     verdict, changes, reply_text = agent.handle_command(
         text, config, state, allowlist, model, os.environ["GEMINI_API_KEY"])
-
-    issue_number = event["issue"]["number"]
     print("issue #%s: validated action=%s" % (issue_number, verdict))
-    print("would apply:", changes)
-    print("would reply:", reply_text)
+
+    if dry_run:
+        print("DRY RUN: would apply %r, comment %r, and close issue #%s"
+              % (changes, reply_text, issue_number))
+        return
+
+    agent.apply_changes(changes, config, state)
+    try:
+        post_comment(repo_full_name, issue_number, reply_text, github_token)
+        close_issue(repo_full_name, issue_number, github_token)
+    except RuntimeError as err:
+        print("ERROR commenting/closing issue #%s: %s" % (issue_number, scrub(str(err))))
+
+    check.save_json(check.CONFIG_PATH, config)
+    check.save_json(check.STATE_PATH, state)
 
 
 if __name__ == "__main__":
