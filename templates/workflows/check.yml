@@ -56,14 +56,17 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
         run: python engine/check.py
       # Runs regardless of the step above's outcome. A dry run never
-      # touches state.json, so this is a no-op for it (nothing staged ->
-      # nothing committed).
+      # touches state.json, and on a brand-new instance it may not exist
+      # yet even on a real run's first pass through this step's `git add` —
+      # guarded below so "nothing to add" isn't a git error.
       - name: Commit state changes
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
+          if [ -f state.json ]; then
+            git add state.json
+          fi
           if git diff --staged --quiet; then
             echo "no state changes to commit"
           else
