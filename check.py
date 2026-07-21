@@ -71,7 +71,12 @@ def fetch_rate(from_code, to_code, api_key):
         urllib.parse.quote(api_key),
         urllib.parse.quote(from_code),
     )
-    with urllib.request.urlopen(url, timeout=30) as resp:
+    # Python's default urllib User-Agent ("Python-urllib/3.x") is a common
+    # WAF/bot-filter target; currencyapi.net's own docs say an auth failure
+    # returns 400, so a 403 here points upstream of their app logic, not at
+    # the key itself.
+    req = urllib.request.Request(url, headers={"User-Agent": "rate-agent/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.load(resp)
     rates = data.get("rates")
     if not isinstance(rates, dict) or to_code not in rates:
