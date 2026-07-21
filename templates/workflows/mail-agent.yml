@@ -1,0 +1,84 @@
+# Instance workflow: copy this file into your private instance repo at
+# .github/workflows/mail-agent.yml. Polls the agent's mailbox for
+# candidate command messages and applies any that pass the gates.
+name: mail-agent
+
+on:
+  schedule:
+    # Hourly at :30 -- offset from check.yml's :00 runs so the two never
+    # collide by cron alignment (the shared concurrency group below still
+    # queues them if they ever do overlap).
+    - cron: "30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch and print what would happen; no email, no state/config write"
+        type: boolean
+        default: true
+
+# contents: write is needed for the state-commit step below (a real run
+# updates config.json/state.json and pushes them back).
+permissions:
+  contents: write
+
+# Shared across check/mail-agent/issue-agent: an issue command must not
+# race a scheduled check's state commit, so all three queue on one group
+# rather than cancelling each other.
+concurrency:
+  group: rate-agent
+  cancel-in-progress: false
+
+jobs:
+  mail-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Your instance: config.json + state.json + currencies.json
+      - uses: actions/checkout@v4
+      # The engine: code only. Tracking master means instances always run
+      # the latest engine; point `repository:` (and optionally `ref:`) at
+      # your own copy if you'd rather pin.
+      - uses: actions/checkout@v4
+        with:
+          repository: uros-simcic/rate-agent
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run mail agent
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          COMMAND_SENDER: ${{ secrets.COMMAND_SENDER }}
+          COMMAND_KEYWORD: ${{ secrets.COMMAND_KEYWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python engine/agent_email.py
+      # Runs regardless of the step above's outcome. A dry run never
+      # touches config.json/state.json, and either file may not exist yet
+      # on a brand-new instance -- guarded so "nothing to add" isn't a
+      # git error (same fix as check.yml's state.json guard).
+      - name: Commit state changes
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f config.json ]; then
+            git add config.json
+          fi
+          if [ -f state.json ]; then
+            git add state.json
+          fi
+          if git diff --staged --quiet; then
+            echo "no state changes to commit"
+          else
+            git commit -m "chore(state): $(date -u +%Y-%m-%d) [skip ci]"
+            for attempt in 1 2 3; do
+              if git push; then
+                break
+              fi
+              echo "push failed (attempt $attempt), rebasing and retrying"
+              git pull --rebase
+            done
+          fi
