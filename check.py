@@ -150,9 +150,11 @@ def send_alert_email(wid, from_code, to_code, rate, which, bound_value, history)
         server.sendmail(mail_user, recipients, msg.as_string())
 
 
-def check_watch(watch, state, api_key):
+def check_watch(watch, state, api_key, dry_run=False):
     """Check a single watch. Callers wrap this in try/except so one failing
-    fetch cannot abort the run for the others."""
+    fetch cannot abort the run for the others. In dry_run, every write to
+    state.json is skipped and the alert becomes a print preview, so a
+    dispatched dry run can never mark a watch alerted or send mail."""
     wid = watch["id"]
     from_code = watch["from"].upper()
     to_code = watch["to"].upper()
@@ -165,13 +167,19 @@ def check_watch(watch, state, api_key):
         return
     rate = fetch_rate(from_code, to_code, api_key)
     # Recorded for every successful check, alert or not — the sparkline
-    # needs a real trend line for watches that never cross a bound.
+    # needs a real trend line for watches that never cross a bound. Kept
+    # in-memory even in dry_run (harmless — never written to disk), so the
+    # preview sparkline below looks like the real one would.
     history = entry.setdefault("history", [])
     history.append([utc_timestamp(), rate])
     del history[:-HISTORY_CAP]
 
     which = crossed_bound(rate, watch)
     if which is None:
+        return
+    if dry_run:
+        print("DRY RUN: would alert %s: 1 %s = %s %s (%s bound crossed)" % (
+            wid, from_code, format_rate(rate), to_code, which))
         return
     # Mark alerted and persist BEFORE the alert action: if alerting fails,
     # the flag is already saved and the alert will not repeat next run.
@@ -206,17 +214,23 @@ def main():
             text = text.replace(mail_pass, "<MAIL_APP_PASSWORD>")
         return text
 
+    # Cron runs pass no env at all, so DRY_RUN is empty and this is False —
+    # the real run. Only an explicit "1"/"true" from workflow_dispatch
+    # turns on the preview path.
+    dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true")
+
     config = load_json(CONFIG_PATH, None)
     state = load_json(STATE_PATH, {})
     for watch in config.get("watches", []):
         try:
-            check_watch(watch, state, api_key)
+            check_watch(watch, state, api_key, dry_run)
         except Exception as err:
             # One watch's failure is logged (key-scrubbed) and skipped; the
             # remaining watches still run.
             print("ERROR checking %s: %s" % (watch.get("id", "?"), scrub(str(err))),
                   file=sys.stderr)
-    save_state(state)
+    if not dry_run:
+        save_state(state)
 
 
 if __name__ == "__main__":

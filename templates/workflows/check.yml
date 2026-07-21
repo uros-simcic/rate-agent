@@ -1,0 +1,78 @@
+# Instance workflow: copy this file into your private instance repo at
+# .github/workflows/check.yml. Runs the scheduled rate check against
+# YOUR config.json/state.json, checking out the engine (public code)
+# alongside them.
+name: check
+
+on:
+  schedule:
+    # 06/11/17 UTC = 08/13/19 CEST; drifts +1h local in winter — accepted,
+    # no timezone logic added for it. On a cron event there are no
+    # inputs, so DRY_RUN comes through empty and the real run executes.
+    - cron: "0 6,11,17 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch and print what would happen; no email, no state write"
+        type: boolean
+        default: true
+
+# contents: write is needed for the state-commit step below (a real run
+# updates state.json and pushes it back, the only way the alerted/history
+# ledger survives past this ephemeral runner).
+permissions:
+  contents: write
+
+# Shared across check/mail-agent/issue-agent: an issue command must not
+# race a scheduled check's state commit, so all three queue on one group
+# rather than cancelling each other.
+concurrency:
+  group: rate-agent
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Your instance: config.json + state.json
+      - uses: actions/checkout@v4
+      # The engine: code only. Tracking master means instances always run
+      # the latest engine; point `repository:` (and optionally `ref:`) at
+      # your own copy if you'd rather pin.
+      - uses: actions/checkout@v4
+        with:
+          repository: uros-simcic/rate-agent
+          path: engine
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run check
+        env:
+          CURRENCYAPI_KEY: ${{ secrets.CURRENCYAPI_KEY }}
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python engine/check.py
+      # Runs regardless of the step above's outcome. A dry run never
+      # touches state.json, so this is a no-op for it (nothing staged ->
+      # nothing committed).
+      - name: Commit state changes
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --staged --quiet; then
+            echo "no state changes to commit"
+          else
+            git commit -m "chore(state): $(date -u +%Y-%m-%d) [skip ci]"
+            for attempt in 1 2 3; do
+              if git push; then
+                break
+              fi
+              echo "push failed (attempt $attempt), rebasing and retrying"
+              git pull --rebase
+            done
+          fi
