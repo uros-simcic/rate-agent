@@ -90,8 +90,20 @@ def main():
     allowlist = agent.load_allowlist()
     model = config.get("gemini_model", "gemini-3.5-flash")
 
-    verdict, changes, reply_text = agent.handle_command(
-        text, config, state, allowlist, model, os.environ["GEMINI_API_KEY"])
+    try:
+        verdict, changes, reply_text = agent.handle_command(
+            text, config, state, allowlist, model, os.environ["GEMINI_API_KEY"])
+    except agent.GeminiError as err:
+        # Transient parse outage: comment so the owner knows, but leave the
+        # issue OPEN and change nothing, so it can be retried (open a new
+        # issue) rather than silently closed as "couldn't parse".
+        print("issue #%s: parse temporarily unavailable (%s)"
+              % (issue_number, scrub(str(err))))
+        if not dry_run:
+            post_comment(repo_full_name, issue_number,
+                         "Command parsing is temporarily unavailable; "
+                         "please open a new issue to retry.", github_token)
+        return
     print("issue #%s: validated action=%s" % (issue_number, verdict))
 
     if dry_run:

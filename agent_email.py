@@ -120,6 +120,15 @@ def main():
                 try:
                     verdict, changes, reply_text = agent.handle_command(
                         text, config, state, allowlist, model, gemini_api_key)
+                except agent.GeminiError as err:
+                    # Transient parse outage (503/quota/network after
+                    # retries): leave the message UNSEEN so the next poll
+                    # retries it, rather than consuming the command and
+                    # replying "couldn't parse". Skip straight to the next
+                    # candidate without marking this one seen.
+                    print("candidate %s: parse temporarily unavailable (%s) -- "
+                          "left unread to retry" % (msg_id.decode(), scrub(str(err))))
+                    continue
                 except Exception as err:
                     verdict, changes = "unknown", None
                     reply_text = "Couldn't process that command."
@@ -138,7 +147,8 @@ def main():
 
             # Marked \Seen whether or not it parsed -- processed once,
             # never reprocessed. Dry runs skip this too: nothing should
-            # be consumed by a preview.
+            # be consumed by a preview. (A transient parse outage above
+            # `continue`s past this, so it stays unread for the next poll.)
             if not dry_run:
                 imap.store(msg_id, "+FLAGS", "\\Seen")
     finally:

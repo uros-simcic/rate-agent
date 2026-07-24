@@ -147,19 +147,16 @@ def parse_command(text, model, api_key):
 
 
 def handle_command(text, config, state, allowlist, model, api_key):
-    """End-to-end: parse untrusted text via Gemini, then validate. Same
-    (verdict, changes, reply_text) return shape as validate_command --
-    a GeminiError becomes an "unknown" verdict so callers have one path
-    for every parse-or-validate failure, never a crash."""
-    try:
-        parsed = parse_command(text, model, api_key)
-    except GeminiError as err:
-        # Logged, not swallowed -- an "unknown" verdict from a genuine
-        # parse failure (bad model name, auth, quota) needs to be
-        # distinguishable in the Actions log from the model correctly
-        # classifying an ambiguous message as unknown.
-        print("Gemini parse failed: %s" % err)
-        return "unknown", None, "Couldn't parse that command."
+    """End-to-end: parse untrusted text via Gemini, then validate. Returns
+    validate_command's (verdict, changes, reply_text).
+
+    Raises GeminiError if the parse call itself fails (503/quota/network
+    after retries) -- deliberately NOT swallowed into an "unknown" reply,
+    because a transient outage must be distinguishable from the model
+    genuinely classifying a message as unknown: the channels leave the
+    command unprocessed to retry rather than consume it and reply
+    "couldn't parse.\""""
+    parsed = parse_command(text, model, api_key)
     return validate_command(parsed, config, state, allowlist)
 
 
