@@ -17,6 +17,7 @@ produced -- never anything parsed directly from model output.
 import json
 import math
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -75,6 +76,33 @@ class GeminiError(Exception):
     """The Gemini parse call failed or returned something unusable."""
 
 
+def _generate(req, attempts=3, backoff_seconds=5):
+    """POST to Gemini with bounded retries. 503 (model overloaded) and 429
+    (rate limited) and transient network errors are retried with a short
+    backoff -- a single spike must not permanently fail a command the user
+    then has to resend. 400 and other 4xx are deterministic rejections and
+    are NOT retried. Mirrors gemini_client.py's retry discipline."""
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as err:
+            detail = ""
+            try:
+                detail = err.read(300).decode("utf-8", "replace")
+            except OSError:
+                pass
+            if err.code not in (429, 503):
+                raise GeminiError("HTTP %d: %s" % (err.code, detail)) from err
+            last_err = GeminiError("HTTP %d: %s" % (err.code, detail))
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            last_err = GeminiError("network error: %s" % err)
+        if attempt < attempts:
+            time.sleep(backoff_seconds)
+    raise last_err
+
+
 def parse_command(text, model, api_key):
     """Ask Gemini to classify one untrusted command message into the §5
     schema. Raises GeminiError on any failure; callers should treat that
@@ -97,16 +125,7 @@ def parse_command(text, model, api_key):
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.load(resp)
-    except urllib.error.HTTPError as err:
-        detail = ""
-        try:
-            detail = err.read(300).decode("utf-8", "replace")
-        except OSError:
-            pass
-        raise GeminiError("HTTP %d: %s" % (err.code, detail)) from err
+    data = _generate(req)
 
     candidates = data.get("candidates") or []
     if not candidates:
