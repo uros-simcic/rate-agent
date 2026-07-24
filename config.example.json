@@ -2,6 +2,10 @@
   "gemini_model": "gemini-3.5-flash",
   "watches": [
     {"id": "aed_eur", "from": "AED", "to": "EUR", "below": 0.245},
-    {"id": "btc_eur", "from": "BTC", "to": "EUR", "above": 95000}
+    {
+      "id": "btc_eur", "from": "BTC", "to": "EUR", "above": 95000,
+      "feeds": ["https://news.google.com/rss/search?q=bitcoin"],
+      "enrich_min_move_pct": 2
+    }
   ]
 }
