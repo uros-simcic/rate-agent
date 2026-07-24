@@ -57,13 +57,21 @@ def extract_body(msg, max_chars=2000):
 
 
 def fetch_candidates(imap):
-    """Search UNSEEN, return [(msg_id_bytes, email.message.Message), ...]."""
+    """Search UNSEEN, return [(msg_id_bytes, email.message.Message), ...].
+
+    Uses BODY.PEEK[] rather than RFC822 to read each message: a plain
+    RFC822 fetch implicitly sets \\Seen as a side effect, which would mark
+    a message read merely by examining it -- so a message we skip (gate
+    reject, or a transient parse outage we want to retry) would silently
+    never be seen again, and even a dry run would consume the inbox.
+    PEEK fetches without touching the flag; \\Seen is set explicitly by
+    the caller only after a message is actually processed."""
     status, data = imap.search(None, "UNSEEN")
     if status != "OK" or not data or not data[0]:
         return []
     candidates = []
     for msg_id in data[0].split():
-        status, msg_data = imap.fetch(msg_id, "(RFC822)")
+        status, msg_data = imap.fetch(msg_id, "(BODY.PEEK[])")
         if status != "OK":
             continue
         candidates.append((msg_id, email.message_from_bytes(msg_data[0][1])))
