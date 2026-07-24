@@ -134,7 +134,12 @@ def handle_command(text, config, state, allowlist, model, api_key):
     for every parse-or-validate failure, never a crash."""
     try:
         parsed = parse_command(text, model, api_key)
-    except GeminiError:
+    except GeminiError as err:
+        # Logged, not swallowed -- an "unknown" verdict from a genuine
+        # parse failure (bad model name, auth, quota) needs to be
+        # distinguishable in the Actions log from the model correctly
+        # classifying an ambiguous message as unknown.
+        print("Gemini parse failed: %s" % err)
         return "unknown", None, "Couldn't parse that command."
     return validate_command(parsed, config, state, allowlist)
 
