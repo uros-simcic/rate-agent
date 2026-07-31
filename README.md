@@ -89,7 +89,7 @@ This repo is the **engine**: public, code only, no config, no state, no secrets.
 
 ## Commands
 
-Email the agent's mailbox (subject must contain your `COMMAND_KEYWORD`) or open an issue on the instance repo:
+Email the agent's mailbox or open an issue on the instance repo. Phrasing is free-form natural language — these are examples, not required formats:
 
 | Say | Does |
 |---|---|
@@ -99,3 +99,26 @@ Email the agent's mailbox (subject must contain your `COMMAND_KEYWORD`) or open 
 | "resume btc to eur" | Resume a paused watch |
 | "reset the aed to eur alert" | Re-arm a watch that already fired, keeping its history |
 | "what are you watching?" | List every watch with its current status |
+
+**Where the command goes:**
+
+- **Email** — the keyword must be in the **subject**; the command itself must be in the **body**. The subject is only checked for the keyword, never read as a command.
+- **Issue** — title and body are joined, so the command can be in either or split across both. No keyword needed: the private repo plus the owner check is the access control.
+
+Every command gets a reply — a confirmation, a specific rejection reason, or "couldn't parse". Nothing is ever silently dropped.
+
+## What it can watch
+
+**166 currencies**, any pair, in either direction. Direction always means "1 unit of `from` in `to`", exactly like typing "AED to EUR" into a search box.
+
+- **Fiat** (~150): USD, EUR, GBP, CHF, JPY, AUD, CAD, CNY, SEK, NOK, PLN, RSD, …
+- **Crypto**: BTC, ETH, ADA, XRP, LTC, DOGE, SOL, BNB, DOT, …
+- **Metals**: XAU (gold), XAG (silver)
+
+The exact list is whatever your `currencies.json` holds — it is generated from the API's own response, so it always matches what your account can actually query.
+
+**Thresholds:** `above`, `below`, or both on a single watch. A watch fires **once** when a bound is crossed, then stays silent until you reset it — no repeat alerts while the rate sits past the threshold.
+
+**Limits:** up to 10 watches, checked 3×/day (06:00/11:00/17:00 UTC).
+
+**Each alert contains:** the rate, which bound was crossed and its value, a UTC timestamp, and a sparkline of up to 90 past readings (`▁▂▃▄▅▆▇█`).
