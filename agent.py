@@ -197,6 +197,15 @@ def apply_changes(changes, config, state):
         raise ValueError("unknown change op: %r" % op)
 
 
+def _safe_echo(text, limit=12):
+    """Render a rejected, unvalidated model field for display in a reply.
+    Strips everything outside [A-Za-z0-9_-] and truncates: the reply text
+    is used to build an email subject line, so no model-supplied string
+    may reach it unbounded or with arbitrary characters."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "", text or "")[:limit]
+    return cleaned or "(unreadable)"
+
+
 def _valid_bound(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value > 0
 
@@ -221,8 +230,12 @@ def validate_command(parsed, config, state, allowlist):
     to_code = (parsed.get("to") or "").upper()
     for code in (from_code, to_code):
         if not CODE_RE.match(code):
-            return "rejected", None, "Invalid currency code: %r" % code
+            # A code that fails the regex is arbitrary model output, and
+            # reply_text's first line becomes an email SUBJECT -- so echo
+            # only a short, character-restricted slice of it, never raw.
+            return "rejected", None, "Invalid currency code: %s" % _safe_echo(code)
         if code not in allowlist:
+            # Safe to echo whole: it already matched ^[A-Z]{3,5}$ above.
             return "rejected", None, "Unknown currency: %s" % code
 
     # Derived, never model-supplied -- the same id no matter how the model

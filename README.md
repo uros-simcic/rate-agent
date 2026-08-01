@@ -51,8 +51,8 @@ Every watch that crosses a threshold gets an alert with a sparkline of its recen
 - **Python stdlib only.** No pip installs (`urllib`, `imaplib`, `smtplib`, `email`, `xml.etree`, `json`) — nothing to audit beyond this repo.
 - **Untrusted-input hardening.** Every parse prompt states the input is untrusted; every reply is built from validated fields, never echoed raw input.
 - **Fail fast, fail loud.** Missing environment variables are checked once at startup and named explicitly, not discovered lazily wherever the code first happens to need them.
-- **Graceful degradation, not silent failure.** A failed rate fetch skips that watch and logs why; a failed enrichment call sends a plain alert instead of blocking it; every command gets a reply — success, a specific rejection reason, or "couldn't parse" — never a silent drop.
-- **Secrets never reach logs.** Every module that holds a secret defines a `scrub()` that redacts it from anything printed, defending the invariant even though nothing today is known to leak it.
+- **Graceful degradation, not silent failure.** A failed rate fetch skips that watch and logs why; a failed enrichment call sends a plain alert instead of blocking it; every command is answered — success, a specific rejection reason, or "couldn't parse" — and never silently dropped. If the parse API itself is down, the command is deliberately *not* answered with a failure: an email is left unread and an issue left open so the next run retries it, rather than burning the command on a transient outage.
+- **Secrets never reach logs.** Every module that prints while holding a secret defines a `scrub()` that redacts it first (`check.py`, `agent_email.py`, `agent_issue.py`), defending the invariant even though nothing today is known to leak it. `agent.py` and `mailer.py` hold secrets but print nothing at all.
 
 ## Run your own
 
@@ -62,8 +62,17 @@ This repo is the **engine**: public, code only, no config, no state, no secrets.
 2. Copy `config.example.json` into it as `config.json` and add your watches.
 3. Copy the files from `templates/workflows/` into the instance's `.github/workflows/`. They check out this engine at run time; point `repository:` at your own fork if you'd rather pin a specific commit.
 4. Get keys: a free key from [currencyapi.net](https://currencyapi.net) and a Gemini API key from [Google AI Studio](https://aistudio.google.com). Use a **new** Gemini key, not one shared with another project — a leak in one place shouldn't force rotating both.
-5. Set up a dedicated Gmail account for the agent to send/receive from (enable IMAP under Settings → Forwarding and POP/IMAP, and generate an app password).
-6. Add the instance's Actions secrets: `CURRENCYAPI_KEY`, `GEMINI_API_KEY`, `MAIL_USERNAME`, `MAIL_APP_PASSWORD`, `MAIL_TO`, `COMMAND_SENDER`, `COMMAND_KEYWORD`.
+5. Set up a **dedicated Gmail account for the agent** — separate from your own. Enable IMAP on it (Settings → Forwarding and POP/IMAP) and generate an app password **for that account**. This is the mailbox the agent logs into and polls; you send commands *to* it from your personal address.
+6. Add the instance's Actions secrets. Getting the two accounts the right way round is the one thing worth double-checking — reversed, the agent polls your own mailbox, sees only its own sent copies, and appears to do nothing:
+
+   | Secret | Which account |
+   |---|---|
+   | `MAIL_USERNAME` | the **agent's** account — it logs in and polls this inbox |
+   | `MAIL_APP_PASSWORD` | app password **of the agent's account** |
+   | `COMMAND_SENDER` | **your personal** address — the only sender accepted |
+   | `MAIL_TO` | **your personal** address — where alerts and replies are delivered |
+   | `COMMAND_KEYWORD` | a secret word required in every command email's subject |
+   | `CURRENCYAPI_KEY`, `GEMINI_API_KEY` | API keys from step 4 |
 7. Run `tools/refresh_currencies.py` once (locally, or via a temporary workflow step) to generate `currencies.json` — the allowlist every currency code is checked against.
 8. Dispatch the **check** workflow with dry-run enabled and check the log: it prints what would happen for every watch without sending mail or writing state.
 
@@ -85,7 +94,7 @@ This repo is the **engine**: public, code only, no config, no state, no secrets.
 }
 ```
 
-`watches[].id` is always derived (`{from}_{to}`, lowercased) — never set it yourself; it's how the agent recognizes a command as referring to an existing watch. `feeds` and `enrich_min_move_pct` are optional (see "How it works" above).
+`watches[].id` is `{from}_{to}` lowercased. Commands always derive it themselves and never take one from the model — that's how the agent recognizes a command as referring to an existing watch. If you hand-edit `config.json` you can omit `id` and it will be derived the same way; set one explicitly only if you want a non-standard key, and note that a command for that pair will then create a second watch under the derived id. `feeds` and `enrich_min_move_pct` are optional (see "How it works" above).
 
 ## Commands
 

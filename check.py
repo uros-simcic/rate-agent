@@ -275,9 +275,12 @@ def check_watch(watch, state, rates, model, gemini_api_key, dry_run=False):
     code cannot abort the run for the others. In dry_run, every write to
     state.json is skipped and the alert becomes a print preview, so a
     dispatched dry run can never mark a watch alerted or send mail."""
-    wid = watch["id"]
     from_code = watch["from"].upper()
     to_code = watch["to"].upper()
+    # Derived the same way agent.py derives it, so a hand-edited config.json
+    # that omits "id" still works and still lines up with the id a command
+    # would produce for the same pair. An explicit id is respected as-is.
+    wid = watch.get("id") or "%s_%s" % (from_code.lower(), to_code.lower())
     entry = state.setdefault(wid, {})
     if entry.get("paused"):
         print("skipping %s (paused)" % wid)
